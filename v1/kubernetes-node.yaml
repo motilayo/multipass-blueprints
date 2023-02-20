@@ -1,0 +1,91 @@
+description: Kubernetes node blueprint      # * a short description of the blueprint ("tagline")
+version: latest         # * a version string
+
+runs-on:                   # a list of architectures this blueprint can run on
+- arm64                    #   see https://doc.qt.io/qt-5/qsysinfo.html#currentCpuArchitecture
+- x86_64                   #   for a list of valid values
+
+instances:
+  kubernetes-node:                  # * equal to the blueprint name
+    image: 22.04    # a valid image alias, see `multipass find` for available values
+    limits:
+      min-cpu: 3      # the minimum number of CPUs this blueprint can work with
+      min-mem: 4G    # the minimum amount of memory (can use G/K/M/B suffixes)
+      min-disk: 20G   # and the minimum disk size (as above)
+    timeout: 10         # maximum time for the instance to launch, and separately for cloud-init to complete
+    cloud-init:
+      vendor-data: |       # cloud-init vendor data
+        # create ssh passwordless user
+        users:
+          - name: ubuntu
+            home: /home/ubuntu
+            shell: /bin/bash
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            ssh_authorized_keys:
+              - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCmSJ+uvYRyohaI9XiVBFu6C2soVv+HSFAWuzYmpQegjHQMQsDmo+5I0dn4+mMyD+WreXPZomdFSwLKUshUkpbyt+Vt0OG9YQ50AcOp7b5VL1FCH2XivNsmRiG2rHffdYVK2FpmmrulRy4kLTSv3OciQUPsO58Fx3xAa8tksJtJR0XXD4cQVTtLqFwoVy77Z7cU8AmkW/icuR5kA5ROk4Z5kC9pO1KWQiO3gv1xeEPwmL0Cz1+ehIe1sP/1uCzbhH3+O9rO1qhqRyKgNwMPCvSpqcXmuh63xepbvx4n2BiExJPEoNxo0yb1rRlLouetGv5cR9Yqbc/v6/mtESL2pBPjwl7FGENWTh6X3g91HD/KdJVBexTO2mEVlWa0VW6caZ/ijw0BoxHLh3p2nUP4gtx7XwsgstKS3ghVVbTuJR9Nugz7YJRSAy/jzk4RCtnfecn82ClRQMGAOC3EUCaO96vdAKI1drQMiP0FVJi4ZoNdmcYrMR8akJuWoHO3XkquTWE=
+
+        bootcmd:
+          - sudo swapoff -a
+
+        # create files
+        write_files:
+          - path: /etc/systemd/resolved.conf
+            append: true
+            content: |
+              MulticastDNS=yes
+
+          - path: /etc/systemd/system/mdns@.service
+            content: |
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/resolvectl mdns %i yes
+
+              [Install]
+              WantedBy=sys-subsystem-net-devices-%i.device
+
+          - path: /etc/modules-load.d/containerd.conf
+            content: |
+              overlay
+              br_netfilter
+
+          - path: /etc/sysctl.d/99-kubernetes-cri.conf
+            content: |
+              net.bridge.bridge-nf-call-iptables  = 1
+              net.ipv4.ip_forward                 = 1
+              net.bridge.bridge-nf-call-ip6tables = 1
+
+          - path: /etc/crictl.yaml
+            content: |
+              runtime-endpoint: unix:///run/containerd/containerd.sock
+              image-endpoint: unix:///run/containerd/containerd.sock
+              timeout: 10
+              debug: true
+
+          - path: /etc/default/kubelet 
+            content: |
+              KUBELET_EXTRA_ARGS=--container-runtime=remote --container-runtime-endpoint='unix:///run/containerd/containerd.sock'
+                                                        
+          - path: /etc/containerd/config.toml
+            content: |
+              version = 2
+
+              [plugins]
+                [plugins."io.containerd.grpc.v1.cri"]
+                  [plugins."io.containerd.grpc.v1.cri".containerd]
+                    snapshotter = "overlayfs"
+                    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+                      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                        runtime_type = "io.containerd.runc.v2"
+                        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                          SystemdCgroup = true
+
+        runcmd:
+          - sudo sysctl --system
+          - systemctl restart systemd-resolved.service
+          - systemctl start mdns@enp0s1.service
+          - systemctl enable mdns@enp0s1.service
+          - sudo modprobe overlay
+          - sudo modprobe br_netfilter
+
+        package_upgrade: true
+        package_reboot_if_required: true
